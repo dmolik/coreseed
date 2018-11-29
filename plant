@@ -28,7 +28,7 @@ conductor gen both $FQDN -i 127.0.0.1 -i $IP -i $KUBE_IP -d $HOST
 conductor gen user system:kube-controller-manager -o system:kube-controller-manager
 conductor gen user system:kube-scheduler -o system:kube-scheduler
 conductor gen user system:kube-proxy -o system:node-proxier
-conductor gen both system:node:$HOST -o system:nodes -d $FQDN -i $IP
+conductor gen both system:node:$HOST -o system:nodes -d $FQDN -i $IP -d $HOST
 conductor gen server service-account
 conductor gen server git.$DOMAIN
 conductor gen user admin -o system:masters
