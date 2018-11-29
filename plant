@@ -1,0 +1,33 @@
+#!/bin/bash
+
+mkdir -p certs
+
+cat << EOF > ~/.cndtrc
+org {
+	o  Stark and Wayne
+	ou StarkAndWayne
+	l  Buffalo
+	st NY
+	c USA
+}
+EOF
+
+FQDN=build-man.sw.cafe
+POD_CIDR=10.202.32.0/19
+SERVICE_CIDR=10.202.16.0/20
+
+IP=$(ip addr show dev eth0 |grep inet |head -n1|awk '{print $2}'|sed -e 's/\/[0-9]\+$//')
+HOST=$(echo $FQDN|sed -e 's/\..*$//')
+DOMAIN=$(echo $FQDN|sed -e "s/$HOST\.//")
+KUBE_IP=$(echo $SERVICE_CIDR|sed -e 's/\.[0-9]\+\/[0-9]\+$/\.1/')
+DNS_IP=$(echo $SERVICE_CIDR|sed -e 's/\.[0-9]\+\/[0-9]\+$/\.53/')
+
+conductor gen both $FQDN -i 127.0.0.1 -i $IP -i $KUBE_IP -d $HOST
+conductor gen user system:kube-controller-manager -o system:kube-controller-manager
+conductor gen user system:kube-scheduler -o system:kube-scheduler
+conductor gen user system:kube-proxy -o system:node-proxier
+conductor gen both system:node:$HOST -o system:nodes -d $FQDN -i $IP
+conductor gen server service-account
+conductor gen server git.$DOMAIN
+
+
