@@ -22,6 +22,8 @@ DOMAIN=$(echo $FQDN|sed -e "s/$HOST\.//")
 KUBE_IP=$(echo $SERVICE_CIDR|sed -e 's/\.[0-9]\+\/[0-9]\+$/\.1/')
 DNS_IP=$(echo $SERVICE_CIDR|sed -e 's/\.[0-9]\+\/[0-9]\+$/\.53/')
 
+cd certs
+
 conductor gen both $FQDN -i 127.0.0.1 -i $IP -i $KUBE_IP -d $HOST
 conductor gen user system:kube-controller-manager -o system:kube-controller-manager
 conductor gen user system:kube-scheduler -o system:kube-scheduler
@@ -29,5 +31,48 @@ conductor gen user system:kube-proxy -o system:node-proxier
 conductor gen both system:node:$HOST -o system:nodes -d $FQDN -i $IP
 conductor gen server service-account
 conductor gen server git.$DOMAIN
+conductor gen user admin -o system:masters
 
+sudo mkdir -p /etc/kubernetes/{manifests,certs,etcd,api,controller,scheduler}
+
+sudo cp ca_chain.pem                      /etc/kubernetes/certs/ca_chain.pem
+sudo cp system\:node\:$HOST.fullchain.pem /etc/kubernetes/certs/cert.fullchain.pem
+sudo cp system\:node\:$HOST.key.pem       /etc/kubernetes/certs/cert.key.pem
+
+sudo cp ca_chain.pem             /etc/kubernetes/api/ca.chain.pem
+sudo cp $FQDN.fullchain.pem      /etc/kubernetes/api/cert.fullchain.pem
+sudo cp $FQDN.key.pem            /etc/kubernetes/api/cert.key.pem
+sudo cp service-account.cert.pem /etc/kubernetes/api/
+
+sudo cp ca_chain.pem        /etc/kubernetes/etcd/ca.chain.pem
+sudo cp $FQDN.fullchain.pem /etc/kubernetes/etcd/cert.fullchain.pem
+sudo cp $FQDN.key.pem       /etc/kubernetes/etcd/cert.key.pem
+
+sudo cp ca_chain.pem                                  /etc/kubernetes/controller/ca.chain.pem
+sudo cp system\:kube-controller-manager.key.pem       /etc/kubernetes/controller/cert.key.pem
+sudo cp system\:kube-controller-manager.fullchain.pem /etc/kubernetes/controller/cert.fullchain.pem
+sudo cp intermediate_cert.pem                         /etc/kubernetes/controller/intermediate.cert.pem
+sudo cp intermediate_key.pem                          /etc/kubernetes/controller/intermediate.key.pem
+sudo cp service-account.key.pem                       /etc/kubernetes/controller/
+
+sudo cp ca_chain.pem                         /etc/kubernetes/scheduler/ca.chain.pem
+sudo cp system\:kube-scheduler.key.pem       /etc/kubernetes/scheduler/cert.key.pem
+sudo cp system\:kube-scheduler.fullchain.pem /etc/kubernetes/scheduler/cert.fullchain.pem
+sudo chown root:root -R /etc/kubernetes 
+
+
+sudo su -c "cat << EOF > /etc/kubernetes/kubelet.yml
+EOF"
+
+sudo su -c "cat << EOF > /etc/kubernetes/kubeconfig.yml
+EOF"
+sudo su -c "cat << EOF > /etc/kubernetes/controller/kubeconfig.yml
+EOF"
+sudo su -c "cat << EOF > /etc/kubernetes/scheduler/kubeconfig.yml
+EOF"
+
+sudo su -c "cat << EOF > /etc/kubernetes/manifests/etcd.yml
+EOF"
+sudo su -c "cat << EOF > /etc/kubernetes/manifests/control-plane.yml
+EOF"
 
