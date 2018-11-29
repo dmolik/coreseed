@@ -986,7 +986,7 @@ spec:
     singular: networkpolicy
 EOF
 
-kubectl create secret tls kube-proxy-tls  --cert=system\:kube-proxy.cert.pem --key=system\:kube-proxy.key.pem
+kubectl create -n kube-system secret tls kube-proxy-tls  --cert=system\:kube-proxy.cert.pem --key=system\:kube-proxy.key.pem
 CA64=$(cat ca_chain.pem|base64 -w 0)
 cat << EOF | kubectl apply -f -
 ---
