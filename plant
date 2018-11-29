@@ -35,7 +35,7 @@ conductor gen user admin -o system:masters
 
 sudo mkdir -p /etc/kubernetes/{manifests,certs,etcd,api,controller,scheduler}
 
-sudo cp ca_chain.pem                      /etc/kubernetes/certs/ca_chain.pem
+sudo cp ca_chain.pem                      /etc/kubernetes/certs/ca.chain.pem
 sudo cp system\:node\:$HOST.fullchain.pem /etc/kubernetes/certs/cert.fullchain.pem
 sudo cp system\:node\:$HOST.key.pem       /etc/kubernetes/certs/cert.key.pem
 
@@ -159,7 +159,7 @@ metadata:
   namespace: kube-system
 spec:
   containers:
-  - image: docker.io/graytshirt/etcd:3.3.10
+  - image: docker.io/whisperos/etcd:3.3.10
     command:
     - /etcd
     args:
@@ -209,7 +209,7 @@ spec:
     - mountPath: /var/lib/etcd
       name: lib
       readOnly: false
-    - mountPath: /var/log/etcd/etcd.log
+    - mountPath: /var/log/etcd.log
       name: log
       readOnly: false
     - mountPath: /etc/kubernetes/etcd
@@ -222,7 +222,7 @@ spec:
       type: DirectoryOrCreate
     name: lib
   - hostPath:
-      path: /var/log/etcd/etcd.log
+      path: /var/log/etcd.log
       type: FileOrCreate
     name: log
   - hostPath:
@@ -304,7 +304,7 @@ spec:
     command:
     - /kube-controller-manager
     args:
-    - --kubeconfig=/etc/kubernetes/kubeconfig.yml
+    - --kubeconfig=/etc/kubernetes/controller/kubeconfig.yml
     - --cluster-name=sw
     - --tls-cert-file=/etc/kubernetes/controller/cert.fullchain.pem
     - --tls-private-key-file=/etc/kubernetes/controller/cert.key.pem
@@ -355,3 +355,57 @@ spec:
       readOnly: true
 EOF"
 
+sudo rc-service crio restart
+sudo rc-service kubelet restart
+
+kubectl config set-cluster ${DOMAIN} --server=https://${IP}:6443 --embed-certs=true --certificate-authority=ca_chain.pem
+kubectl config set-credentials admin --embed-certs=true --client-certificate=admin.cert.pem --client-key=admin.key.pem
+kubectl config set-context ${DOMAIN}-context --user admin --cluster ${DOMAIN}
+kubectl config use-context ${DOMAIN}-context
+
+while true ; do 
+	kubectl version && break || sleep 1
+done
+
+while true ; do
+	kubectl get clusterrole && break || sleep 1
+done
+
+cat <<EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  annotations:
+    rbac.authorization.kubernetes.io/autoupdate: "true"
+  labels:
+    kubernetes.io/bootstrapping: rbac-defaults
+  name: system:kube-apiserver-to-kubelet
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - nodes/proxy
+      - nodes/stats
+      - nodes/log
+      - nodes/spec
+      - nodes/metrics
+      - nodes/patch
+    verbs:
+      - "*"
+EOF
+
+cat <<EOF | kubectl apply -f -
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: system:kube-apiserver
+  namespace: ""
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:kube-apiserver-to-kubelet
+subjects:
+  - apiGroup: rbac.authorization.k8s.io
+    kind: User
+    name: ${FQDN}
+EOF
