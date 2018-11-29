@@ -62,17 +62,296 @@ sudo chown root:root -R /etc/kubernetes
 
 
 sudo su -c "cat << EOF > /etc/kubernetes/kubelet.yml
+kind: KubeletConfiguration
+apiVersion: kubelet.config.k8s.io/v1beta1
+evictionHard:
+  memory.available:  \"200Mi\"
+tlsCertFile:       /etc/kubernetes/certs/cert.fullchain.pem
+tlsPrivateKeyFile: /etc/kubernetes/certs/cert.key.pem
+staticPodPath:     /etc/kubernetes/manifests
+address: ${IP}
+CgroupDriver:      cgroupfs
+CgroupRoot:        /
+clusterDomain: ${DOMAIN}
+clusterDNS:
+  - ${DNS_IP}
+authentication:
+  anonymous:
+    enabled: false
+  webhook:
+    enabled: true
+  x509:
+    clientCAFile: /etc/kubernetes/certs/ca.chain.pem
+authorization:
+  mode: Webhook
+KubeletAuthentication:
+  KubeletX509Authentication:
+    ClientCAFile: /etc/kubernetes/certs/ca.chain.pem
 EOF"
 
 sudo su -c "cat << EOF > /etc/kubernetes/kubeconfig.yml
+apiVersion: v1
+kind: Config
+clusters:
+- name: sw
+  cluster:
+    server: https://${IP}:6443
+    certificate-authority: /etc/kubernetes/certs/ca.chain.pem
+users:
+- name: kubelet
+  user:
+    client-certificate: /etc/kubernetes/certs/cert.fullchain.pem
+    client-key:         /etc/kubernetes/certs/cert.key.pem
+contexts:
+- context:
+    cluster: sw
+    user: kubelet
+  name: sw-context
+current-context: sw-context
 EOF"
 sudo su -c "cat << EOF > /etc/kubernetes/controller/kubeconfig.yml
+apiVersion: v1
+kind: Config
+clusters:
+- name: sw
+  cluster:
+    server: https://${IP}:6443
+    certificate-authority: /etc/kubernetes/controller/ca.chain.pem
+users:
+- name: kubelet
+  user:
+    client-certificate: /etc/kubernetes/controller/cert.fullchain.pem
+    client-key:         /etc/kubernetes/controller/cert.key.pem
+contexts:
+- context:
+    cluster: sw
+    user: kubelet
+  name: sw-context
+current-context: sw-context
 EOF"
 sudo su -c "cat << EOF > /etc/kubernetes/scheduler/kubeconfig.yml
+apiVersion: v1
+kind: Config
+clusters:
+- name: sw
+  cluster:
+    server: https://${IP}:6443
+    certificate-authority: /etc/kubernetes/scheduler/ca.chain.pem
+users:
+- name: kubelet
+  user:
+    client-certificate: /etc/kubernetes/scheduler/cert.fullchain.pem
+    client-key:         /etc/kubernetes/scheduler/cert.key.pem
+contexts:
+- context:
+    cluster: sw
+    user: kubelet
+  name: sw-context
+current-context: sw-context
 EOF"
 
 sudo su -c "cat << EOF > /etc/kubernetes/manifests/etcd.yml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: etcd
+  namespace: kube-system
+spec:
+  containers:
+  - image: docker.io/graytshirt/etcd:3.3.10
+    command:
+    - /etcd
+    args:
+    - --name=${FQDN}
+    - --data-dir=/var/lib/etcd
+    - --trusted-ca-file=/etc/kubernetes/etcd/ca.chain.pem
+    - --peer-trusted-ca-file=/etc/kubernetes/etcd/ca.chain.pem
+    - --client-cert-auth
+    - --cert-file=/etc/kubernetes/etcd/cert.fullchain.pem
+    - --key-file=/etc/kubernetes/etcd/cert.key.pem
+    - --peer-cert-file=/etc/kubernetes/etcd/cert.fullchain.pem
+    - --peer-key-file=/etc/kubernetes/etcd/cert.key.pem
+    - --enable-v2=false
+    - --peer-auto-tls=false
+    - --initial-cluster-state=new
+    - --initial-cluster-token='boot-kube-etcd-cluster'
+    - --initial-cluster
+    - '${FQDN}=https://${IP}:2380'
+    - --listen-peer-urls
+    - https://${IP}:2380
+    - --listen-client-urls
+    - http://127.0.0.1:2379,https://${IP}:2379
+    - --initial-advertise-peer-urls
+    - https://${FQDN}:2380
+    - --advertise-client-urls
+    - http://127.0.0.1:2379,https://${IP}:2379,https://${FQDN}:2379
+    #livenessProbe:
+    #  httpGet:
+    #    host: 127.0.0.1
+    #    path: /health
+    #    port: 2379
+    #    schema: HTTP
+    #  initialDelaySeconds: 5
+    #  timeoutSeconds: 15
+    name: etcd
+    ports:
+    - containerPort: 2380
+      hostPort: 2380
+      name: serverport
+    - containerPort: 2379
+      hostPort: 2379
+      name: clientport
+    resources:
+      requests:
+        cpu: 250m
+    volumeMounts:
+    - mountPath: /var/lib/etcd
+      name: lib
+      readOnly: false
+    - mountPath: /var/log/etcd/etcd.log
+      name: log
+      readOnly: false
+    - mountPath: /etc/kubernetes/etcd
+      name: etc
+      readOnly: true
+  hostNetwork: true
+  volumes:
+  - hostPath:
+      path: /var/lib/etcd
+      type: DirectoryOrCreate
+    name: lib
+  - hostPath:
+      path: /var/log/etcd/etcd.log
+      type: FileOrCreate
+    name: log
+  - hostPath:
+      path: /etc/kubernetes/etcd
+    name: etc
 EOF"
 sudo su -c "cat << EOF > /etc/kubernetes/manifests/control-plane.yml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: control-plane
+  namespace: kube-system
+spec:
+  hostNetwork: true
+  volumes:
+  - hostPath:
+      path: /etc/kubernetes/api
+    name: etc-api
+  - hostPath:
+      path: /etc/kubernetes/scheduler
+    name: etc-scheduler
+  - hostPath:
+      path: /etc/kubernetes/controller
+    name: etc-controller
+  containers:
+  - image: docker.io/whisperos/kube-apiserver:1.12.3
+    name: kube-apiserver
+    command:
+    - /kube-apiserver
+    args:
+    - --etcd-servers=https://${IP}:2379
+    - --etcd-cafile=/etc/kubernetes/api/ca.chain.pem
+    - --etcd-certfile=/etc/kubernetes/api/cert.fullchain.pem
+    - --etcd-keyfile=/etc/kubernetes/api/cert.key.pem
+    - --tls-cert-file=/etc/kubernetes/api/cert.fullchain.pem
+    - --tls-private-key-file=/etc/kubernetes/api/cert.key.pem
+    - --kubelet-certificate-authority=/etc/kubernetes/api/ca.chain.pem
+    - --kubelet-client-certificate=/etc/kubernetes/api/cert.fullchain.pem
+    - --kubelet-client-key=/etc/kubernetes/api/cert.key.pem
+    - --cert-dir=/etc/kubernetes/api
+    - --cloud-provider=external
+    - --allow-privileged
+    - --enable-admission-plugins=Initializers,NamespaceLifecycle,NodeRestriction,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota
+    - --client-ca-file=/etc/kubernetes/api/ca.chain.pem
+    - --external-hostname=${FQDN}
+    - --insecure-port=0
+    - --service-cluster-ip-range=${SERVICE_CIDR}
+    - --bind-address=${IP}
+    - --advertise-address=${IP}
+    - --apiserver-count=1
+    - --endpoint-reconciler-type=master-count
+    - --authorization-mode=Node,RBAC
+    - --enable-aggregator-routing=true
+    - --service-account-key-file=/etc/kubernetes/api/service-account.cert.pem
+    - --requestheader-client-ca-file=/etc/kubernetes/api/ca.chain.pem
+    - --requestheader-allowed-names=aggregator,metrics-server,admin,system:kube-proxy,system:kube-controller-manager,system:kube-scheduler
+    - --requestheader-extra-headers-prefix=X-Remote-Extra-
+    - --requestheader-group-headers=X-Remote-Group
+    - --requestheader-username-headers=X-Remote-User
+    livenessProbe:
+      httpGet:
+        host: \"${IP}\"
+        path: /healthz
+        port: 6443
+        scheme: HTTPS
+      initialDelaySeconds: 15
+      timeoutSeconds: 15
+    ports:
+    - containerPort: 6443
+      hostPort: 6443
+      name: https
+    volumeMounts:
+    - mountPath: /etc/kubernetes/api
+      name: etc-api
+      readOnly: true
+  - name: kube-controller-manager
+    image: docker.io/whisperos/kube-controller-manager:1.12.3
+    command:
+    - /kube-controller-manager
+    args:
+    - --kubeconfig=/etc/kubernetes/kubeconfig.yml
+    - --cluster-name=sw
+    - --tls-cert-file=/etc/kubernetes/controller/cert.fullchain.pem
+    - --tls-private-key-file=/etc/kubernetes/controller/cert.key.pem
+    - --cluster-signing-cert-file=/etc/kubernetes/controller/intermediate.cert.pem
+    - --cluster-signing-key-file=/etc/kubernetes/controller/intermediate.key.pem
+    - --root-ca-file=/etc/kubernetes/controller/ca.chain.pem
+    - --service-account-private-key-file=/etc/kubernetes/controller/service-account.key.pem
+    - --cloud-provider=external
+    - --allocate-node-cidrs
+    - --cluster-cidr=${POD_CIDR}
+    - --service-cluster-ip-range=${SERVICE_CIDR}
+    - --use-service-account-credentials=true
+    livenessProbe:
+      httpGet:
+        host: 127.0.0.1
+        path: /healthz
+        port: 10252
+        scheme: HTTP
+      initialDelaySeconds: 15
+      timeoutSeconds: 15
+    ports:
+    - containerPort: 10252
+      hostport: 10252
+    volumeMounts:
+    - mountPath: /etc/kubernetes/controller
+      name: etc-controller
+      readOnly: false
+  - name: kube-scheduler
+    image: docker.io/whisperos/kube-scheduler:1.12.3
+    command:
+    - /kube-scheduler
+    args:
+    - --kubeconfig=/etc/kubernetes/scheduler/kubeconfig.yml
+    livenessProbe:
+      httpGet:
+        host: 127.0.0.1
+        path: /healthz
+        port: 10251
+        scheme: HTTP
+      initialDelaySeconds: 15
+      timeoutSeconds: 15
+    ports:
+    - containerPort: 10251
+      hostPort: 10251
+    volumeMounts:
+    - mountPath: /etc/kubernetes/scheduler
+      name: etc-scheduler
+      readOnly: true
 EOF"
 
