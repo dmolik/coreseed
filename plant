@@ -1385,6 +1385,29 @@ spec:
   - name: dns-tcp
     port: 53
     protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  labels:
+    k8s-app: kube-dns
+  name: kube-dns-ingress
+  namespace: kube-system
+spec:
+  ports:
+  - name: dns
+    port: 53
+    protocol: UDP
+    targetPort: 53
+    nodePort: 53
+  - name: dns-tcp
+    port: 53
+    protocol: TCP
+    targetPort: 53
+    nodePort: 53
+  selector:
+    k8s-app: kube-dns
+  type: NodePort
 EOF
 cat << EOF | kubectl apply -f -
 ---
@@ -1821,6 +1844,8 @@ spec:
         env:
           - name:  "APP_NAME"
             value: "Stark & Wayne :: Gitea"
+          - name:  "ROOT_URL"
+            value: "https://git.${DOMAIN}"
           - name:  "DB_TYPE"
             value: "postgres"
           - name:  "DB_HOST"
@@ -1840,6 +1865,14 @@ spec:
               secretKeyRef:
                 name: pg-git-secrets
                 key: db_pass
+          - name: "SESSION_PROVIDER"
+            value: "redis"
+          - name: "SESSION_PROVIDER_CONFIG"
+            value: "network=tcp,addr=redis-master.ci.svc.${DOMAIN}:6379,db=0,pool_size=100,idle_timeout=180"
+          - name: "CACHE_ADAPTER"
+            value: "redis"
+          - name: "CACHE_HOST"
+            value: "network=tcp,addr=redis-master.ci.svc.${DOMAIN}:6379,db=1,pool_size=100,idle_timeout=180"
       restartPolicy: Always
       terminationGracePeriodSeconds: 20
 ---
