@@ -60,7 +60,21 @@ sudo cp system\:kube-scheduler.key.pem       /etc/kubernetes/scheduler/cert.key.
 sudo cp system\:kube-scheduler.fullchain.pem /etc/kubernetes/scheduler/cert.fullchain.pem
 sudo chown root:root -R /etc/kubernetes 
 
-
+ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
+sudo su -c "cat << EOF > /etc/kubernetes/api/encryption.yml
+---
+kind: EncryptionConfig
+apiVersion: v1
+resources:
+  - resources:
+    - secrets
+    providers:
+    - identity: {}
+    - aesgcm:
+        keys:
+        - name: key1
+          secret: ${ENCRYPTION_KEY}
+EOF"
 sudo su -c "cat << EOF > /etc/kubernetes/kubelet.yml
 kind: KubeletConfiguration
 apiVersion: kubelet.config.k8s.io/v1beta1
@@ -268,9 +282,11 @@ spec:
     - --allow-privileged
     - --enable-admission-plugins=Initializers,NamespaceLifecycle,NodeRestriction,LimitRanger,ServiceAccount,DefaultStorageClass,ResourceQuota
     - --client-ca-file=/etc/kubernetes/api/ca.chain.pem
+    - --experimental-encryption-provider-config=/etc/kubernetes/api/encryption.yml
     - --external-hostname=${FQDN}
     - --insecure-port=0
     - --service-cluster-ip-range=${SERVICE_CIDR}
+    - --service-node-port-range=21-30000
     - --bind-address=${IP}
     - --advertise-address=${IP}
     - --apiserver-count=1
@@ -1369,4 +1385,500 @@ spec:
   - name: dns-tcp
     port: 53
     protocol: TCP
+EOF
+cat << EOF | kubectl apply -f -
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ingress-nginx
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: nginx-configuration
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: nginx-ingress-serviceaccount
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  name: nginx-ingress-clusterrole
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - endpoints
+      - nodes
+      - pods
+      - secrets
+    verbs:
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - nodes
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - services
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - "extensions"
+    resources:
+      - ingresses
+    verbs:
+      - get
+      - list
+      - watch
+  - apiGroups:
+      - ""
+    resources:
+      - events
+    verbs:
+      - create
+      - patch
+  - apiGroups:
+      - "extensions"
+    resources:
+      - ingresses/status
+    verbs:
+      - update
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: Role
+metadata:
+  name: nginx-ingress-role
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+rules:
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+      - pods
+      - secrets
+      - namespaces
+    verbs:
+      - get
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    resourceNames:
+      # Defaults to "<election-id>-<ingress-class>"
+      # Here: "<ingress-controller-leader>-<nginx>"
+      # This has to be adapted if you change either parameter
+      # when launching the nginx-ingress-controller.
+      - "ingress-controller-leader-nginx"
+    verbs:
+      - get
+      - update
+  - apiGroups:
+      - ""
+    resources:
+      - configmaps
+    verbs:
+      - create
+  - apiGroups:
+      - ""
+    resources:
+      - endpoints
+    verbs:
+      - get
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: RoleBinding
+metadata:
+  name: nginx-ingress-role-nisa-binding
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: nginx-ingress-role
+subjects:
+  - kind: ServiceAccount
+    name: nginx-ingress-serviceaccount
+    namespace: ingress-nginx
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  name: nginx-ingress-clusterrole-nisa-binding
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: nginx-ingress-clusterrole
+subjects:
+  - kind: ServiceAccount
+    name: nginx-ingress-serviceaccount
+    namespace: ingress-nginx
+---
+apiVersion: extensions/v1beta1
+kind: Deployment
+metadata:
+  name: nginx-ingress-controller
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: ingress-nginx
+      app.kubernetes.io/part-of: ingress-nginx
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: ingress-nginx
+        app.kubernetes.io/part-of: ingress-nginx
+      annotations:
+        prometheus.io/port: "10254"
+        prometheus.io/scrape: "true"
+    spec:
+      serviceAccountName: nginx-ingress-serviceaccount
+      containers:
+        - name: nginx-ingress-controller
+          image: quay.io/kubernetes-ingress-controller/nginx-ingress-controller:0.21.0
+          args:
+            - /nginx-ingress-controller
+            - --configmap=\$(POD_NAMESPACE)/nginx-configuration
+            - --tcp-services-configmap=\$(POD_NAMESPACE)/tcp-services
+            - --udp-services-configmap=\$(POD_NAMESPACE)/udp-services
+            - --publish-service=\$(POD_NAMESPACE)/ingress-nginx
+            - --annotations-prefix=nginx.ingress.kubernetes.io
+          securityContext:
+            capabilities:
+              drop:
+                - ALL
+              add:
+                - NET_BIND_SERVICE
+            # www-data -> 33
+            runAsUser: 33
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+          ports:
+            - name: http
+              containerPort: 80
+            - name: https
+              containerPort: 443
+          livenessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+          readinessProbe:
+            failureThreshold: 3
+            httpGet:
+              path: /healthz
+              port: 10254
+              scheme: HTTP
+            periodSeconds: 10
+            successThreshold: 1
+            timeoutSeconds: 1
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ingress-nginx
+  namespace: ingress-nginx
+  labels:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+spec:
+  type: NodePort
+  ports:
+    - name: http
+      port: 80
+      targetPort: 80
+      nodePort: 80
+      protocol: TCP
+    - name: https
+      port: 443
+      nodePort: 443
+      targetPort: 443
+      protocol: TCP
+  selector:
+    app.kubernetes.io/name: ingress-nginx
+    app.kubernetes.io/part-of: ingress-nginx
+EOF
+cat << EOF | kubectl apply -f -
+---
+kind: Namespace
+apiVersion: v1
+metadata:
+  name: ci
+  labels:
+    name: ci
+EOF
+kubectl create -n ci secret tls git-tls --cert git.${DOMAIN}.fullchain.pem --key git.${DOMAIN}.key.pem
+cat << EOF | kubectl apply -f -
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: pg-git
+  namespace: ci
+  labels:
+    app: postgres
+    service: database
+spec:
+  ports:
+  - name: postgres
+    protocol: TCP
+    port: 5432
+    targetPort: 5432
+  selector:
+    app: postgres
+    service: database
+  type: ClusterIP
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: pg-git-secrets
+  namespace: ci
+type: Opaque
+stringData:
+  db_name: gitea
+  db_user: gitea
+  db_pass: AVerySecretDataBasePassword
+---
+apiVersion: apps/v1beta1
+kind: StatefulSet
+metadata:
+  name: pg-git
+  namespace: ci
+  labels:
+    app: postgres
+    service: database
+spec:
+  serviceName: pg-git
+  replicas: 1
+  template:
+    metadata:
+      labels:
+        app: postgres
+        service: database
+    spec:
+      terminationGracePeriodSeconds: 10
+      containers:
+      - name: postgres
+        image: postgres:alpine
+        ports:
+        - name: postgres
+          containerPort: 5432
+        env:
+        - name: PGDATA
+          value: /var/lib/postgresql/data
+        - name: POSTGRES_DB
+          valueFrom:
+            secretKeyRef:
+              name: pg-git-secrets
+              key: db_name
+        - name: POSTGRES_USER
+          valueFrom:
+            secretKeyRef:
+              name: pg-git-secrets
+              key: db_user
+        - name: POSTGRES_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: pg-git-secrets
+              key: db_pass
+        resources:
+          requests:
+            cpu: "0.01"
+        volumeMounts:
+        - name: postgres-data
+          mountPath: /var/lib/postgresql/data
+      restartPolicy: Always
+      volumes:
+      - name: postgres-data
+        hostPath:
+          path: /var/lib/postgresql/git
+          type: DirectoryOrCreate
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: redis-master
+  namespace: ci
+  labels:
+    app: redis
+    role: master
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: redis
+      role: master
+  template:
+    metadata:
+      labels:
+        app: redis
+        role: master
+    spec:
+      containers:
+      - name: redis-master
+        image: redis:alpine
+        ports:
+        - containerPort: 6379
+          protocol: TCP
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-master
+  namespace: ci
+  labels:
+    app:  redis
+    role: master
+spec:
+  ports:
+  - port: 6379
+    protocol: TCP
+    name: "redis-server"
+  selector:
+    app:  redis
+    role: master
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: gitea
+  namespace: ci
+  labels:
+    app: gitea
+spec:
+  replicas: 1
+  selector:
+      matchLabels:
+        app: gitea
+  template:
+    metadata:
+      labels:
+        app: gitea
+    spec:
+      volumes:
+      - name: git
+        hostPath:
+          path: /var/lib/git
+          type: DirectoryOrCreate
+      containers:
+      - name: gitea
+        image: "gitea/gitea:1.6.0"
+        ports:
+        - containerPort: 3000
+          protocol: TCP
+        - containerPort: 22
+          protocol: TCP
+        volumeMounts:
+        - name: git
+          mountPath: "/data"
+        env:
+          - name:  "APP_NAME"
+            value: "Stark & Wayne :: Gitea"
+          - name:  "DB_TYPE"
+            value: "postgres"
+          - name:  "DB_HOST"
+            value: "pg-git.ci.svc.${DOMAIN}:5432"
+          - name:  "DB_NAME"
+            valueFrom:
+              secretKeyRef:
+                name: pg-git-secrets
+                key: db_name
+          - name:  "DB_USER"
+            valueFrom:
+              secretKeyRef:
+                name: pg-git-secrets
+                key: db_user
+          - name:  "DB_PASSWD"
+            valueFrom:
+              secretKeyRef:
+                name: pg-git-secrets
+                key: db_pass
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 20
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea
+  namespace: ci
+  labels:
+    name: gitea
+spec:
+  ports:
+    - name: "gitea-http"
+      protocol: TCP
+      port: 80
+      targetPort: 3000
+    - name: "gitea-ssh"
+      protocol: TCP
+      port: 22
+      targetPort: 22
+  selector:
+    app: gitea
+---
+apiVersion: extensions/v1beta1
+kind: Ingress
+metadata:
+  name: git
+  namespace: ci
+spec:
+  tls:
+  - hosts:
+    - git.${DOMAIN}
+    secretName: git-tls
+  rules:
+  - host: git.${DOMAIN}
+    http:
+      paths:
+      - backend:
+          serviceName: gitea
+          servicePort: 80
+        path: /
 EOF
