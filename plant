@@ -1,7 +1,5 @@
 #!/bin/bash
 
-mkdir -p certs
-
 cat << EOF > ~/.cndtrc
 org {
 	o  Stark and Wayne
@@ -22,6 +20,11 @@ DOMAIN=$(echo $FQDN|sed -e "s/$HOST\.//")
 KUBE_IP=$(echo $SERVICE_CIDR|sed -e 's/\.[0-9]\+\/[0-9]\+$/\.1/')
 DNS_IP=$(echo $SERVICE_CIDR|sed -e 's/\.[0-9]\+\/[0-9]\+$/\.53/')
 
+TMP=$(mktemp -d)
+echo "Working dir: ${TMP}"
+cd $TMP
+git init .
+mkdir -p certs
 cd certs
 
 conductor gen both $FQDN -i 127.0.0.1 -i $IP -i $KUBE_IP -d $HOST -d "kubernetes.default.svc.cluster.local"
@@ -33,6 +36,8 @@ conductor gen server service-account
 conductor gen server      git.$DOMAIN
 conductor gen server matchbox.$DOMAIN -d matchbox-rpc.$DOMAIN -d matchbox -d matchbox-rpc -i $IP
 conductor gen user admin -o system:masters
+
+git add *
 
 sudo mkdir -p /etc/kubernetes/{manifests,certs,etcd,api,controller,scheduler}
 
@@ -388,7 +393,8 @@ while true ; do
 	kubectl get clusterrole && break || sleep 1
 done
 
-cat <<EOF | kubectl apply -f -
+mkdir ${TMP}/kube-system
+cat <<EOF > ${TMP}/kube-system/rbac.yml
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRole
 metadata:
@@ -409,9 +415,7 @@ rules:
       - nodes/patch
     verbs:
       - "*"
-EOF
-
-cat <<EOF | kubectl apply -f -
+---
 apiVersion: rbac.authorization.k8s.io/v1beta1
 kind: ClusterRoleBinding
 metadata:
@@ -426,7 +430,11 @@ subjects:
     kind: User
     name: ${FQDN}
 EOF
-cat << EOF | kubectl apply -f -
+kubectl apply -f ${TMP}/kube-system/rbac.yml
+git add ${TMP}/kube-system/rbac.yml
+
+mkdir ${TMP}/calico
+cat << EOF > ${TMP}/calico/calico.yml
 kind: ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1beta1
 metadata:
@@ -515,8 +523,7 @@ subjects:
 - kind: ServiceAccount
   name: calico-node
   namespace: kube-system
-EOF
-cat << EOF | kubectl apply -f -
+---
 kind: ConfigMap
 apiVersion: v1
 metadata:
@@ -858,18 +865,14 @@ spec:
           hostPath:
             path: /etc/cni/net.d
 ---
-
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: calico-node
   namespace: kube-system
-
 ---
-
 # Create all the CustomResourceDefinitions needed for
 # Calico policy and networking mode.
-
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
 metadata:
@@ -1002,10 +1005,12 @@ spec:
     plural: networkpolicies
     singular: networkpolicy
 EOF
+kubectl apply -f ${TMP}/calico/calico.yml
+git add ${TMP}/calico/calico.yml
 
 kubectl create -n kube-system secret tls kube-proxy-tls  --cert=system\:kube-proxy.cert.pem --key=system\:kube-proxy.key.pem
 CA64=$(cat ca_chain.pem|base64 -w 0)
-cat << EOF | kubectl apply -f -
+cat << EOF > ${TMP}/kube-system/kube-proxy.yml
 ---
 apiVersion: v1
 kind: ServiceAccount
@@ -1057,7 +1062,6 @@ data:
       user:
         client-certificate: /etc/kubernetes/certs/tls.crt
         client-key: /etc/kubernetes/certs/tls.key
-
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -1197,7 +1201,11 @@ spec:
           path: /lib/modules
       serviceAccountName: kube-proxy
 EOF
-cat << EOF | kubectl apply -f -
+kubectl apply -f ${TMP}/kube-system/kube-proxy.yml
+git add ${TMP}/kube-system/kube-proxy.yml
+
+mkdir ${TMP}/dns
+cat << EOF > ${TMP}/dns/coredns.yml
 apiVersion: v1
 kind: ServiceAccount
 metadata:
@@ -1418,7 +1426,11 @@ spec:
     k8s-app: kube-dns
   type: NodePort
 EOF
-cat << EOF | kubectl apply -f -
+kubectl apply -f ${TMP}/dns/coredns.yml
+git add ${TMP}/dns/coredns.yml
+
+mkdir ${TMP}/ingress
+cat << EOF > ingress/nginx.yml
 ---
 apiVersion: v1
 kind: Namespace
@@ -1676,7 +1688,11 @@ spec:
     app.kubernetes.io/name: ingress-nginx
     app.kubernetes.io/part-of: ingress-nginx
 EOF
-cat << EOF | kubectl apply -f -
+kubectl apply -f ${TMP}/ingress/nginx.yml
+git add ${TMP}/ingress/nginx.yml
+
+mkdir ${TMP}/ci
+cat << EOF > ${TMP}/ci/ns.yml
 ---
 kind: Namespace
 apiVersion: v1
@@ -1685,8 +1701,11 @@ metadata:
   labels:
     name: ci
 EOF
+kubectl apply -f ${TMP}/ci/ns.yml
+git add ${TMP}/ci/ns.yml
+
 kubectl create -n ci secret tls git-tls --cert git.${DOMAIN}.fullchain.pem --key git.${DOMAIN}.key.pem
-cat << EOF | kubectl apply -f -
+cat << EOF > ${TMP}/ci/gitea.yml
 ---
 apiVersion: v1
 kind: Service
@@ -1817,6 +1836,96 @@ spec:
     app:  redis
     role: master
 ---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: git-config
+  namespace: ci
+data:
+  app.ini: |-
+    APP_NAME = Stark & Wayne :: Gitea
+    RUN_MODE = prod
+    RUN_USER = git
+    
+    [repository]
+    ROOT = /data/git/repositories
+    
+    [repository.local]
+    LOCAL_COPY_PATH = /data/gitea/tmp/local-repo
+    
+    [repository.upload]
+    TEMP_PATH = /data/gitea/uploads
+    
+    [server]
+    APP_DATA_PATH    = /data/gitea
+    SSH_DOMAIN       = git.$DOMAIN
+    HTTP_PORT        = 3000
+    ROOT_URL         = https://git.$DOMAIN/
+    DISABLE_SSH      = false
+    SSH_PORT         = 22
+    LFS_CONTENT_PATH = /data/git/lfs
+    DOMAIN           = git.$DOMAIN
+    LFS_START_SERVER = true
+    LFS_JWT_SECRET   = Xz27yLum1XIlPLaOB28L3PcYa0mEEKX9wdTJqBHIV_Q
+    OFFLINE_MODE     = true
+    
+    [database]
+    DB_TYPE  = postgres
+    HOST     = pg-git.ci.svc.cluster.local:5432
+    NAME     = gitea
+    USER     = gitea
+    PASSWD   = AVerySecretDataBasePassword
+    SSL_MODE = disable
+    
+    [indexer]
+    ISSUE_INDEXER_PATH = /data/gitea/indexers/issues.bleve
+    
+    [session]
+    PROVIDER_CONFIG = network=tcp,addr=redis-master.ci.svc.cluster.local:6379,db=0,pool_size=100,idle_timeout=180
+    PROVIDER        = redis
+    
+    [cache]
+    ADAPTER = redis
+    HOST = network=tcp,addr=redis-master.ci.svc.cluster.local:6379,db=1,pool_size=100,idle_timeout=180
+    
+    [picture]
+    AVATAR_UPLOAD_PATH      = /data/gitea/avatars
+    DISABLE_GRAVATAR        = true
+    ENABLE_FEDERATED_AVATAR = false
+    
+    [attachment]
+    PATH = /data/gitea/attachments
+    
+    [log]
+    ROOT_PATH = /data/gitea/log
+    MODE      = file
+    LEVEL     = Info
+    
+    [security]
+    INSTALL_LOCK   = true
+    SECRET_KEY     = VOdBXJR5XFVve5NjRPtHZl33ZUm4ym6QnxivSEYQKx6CBnYGRlPKr8iZj2l2zQzb
+    INTERNAL_TOKEN = eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJuYmYiOjE1NDM2MTY3MDd9.t-15zblEPiiEncnnzzD-MbVrXjnk5537vhtxZ8Z9Eg0
+    
+    [service]
+    DISABLE_REGISTRATION              = false
+    REQUIRE_SIGNIN_VIEW               = true
+    REGISTER_EMAIL_CONFIRM            = false
+    ENABLE_NOTIFY_MAIL                = false
+    ALLOW_ONLY_EXTERNAL_REGISTRATION  = false
+    ENABLE_CAPTCHA                    = false
+    DEFAULT_KEEP_EMAIL_PRIVATE        = false
+    DEFAULT_ALLOW_CREATE_ORGANIZATION = true
+    DEFAULT_ENABLE_TIMETRACKING       = true
+    NO_REPLY_ADDRESS                  = noreply.example.org
+    
+    [mailer]
+    ENABLED = false
+    
+    [openid]
+    ENABLE_OPENID_SIGNIN = true
+    ENABLE_OPENID_SIGNUP = true
+
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -1839,49 +1948,47 @@ spec:
         hostPath:
           path: /var/lib/git
           type: DirectoryOrCreate
+      - name: config
+        configMap:
+          name: git-config
+          items:
+          - key: app.ini
+            path: app.ini
       containers:
-      - name: gitea
+      - name: init-gitea
         image: "gitea/gitea:1.6.0"
-        ports:
-        - containerPort: 3000
-          protocol: TCP
-        - containerPort: 22
-          protocol: TCP
+        command: ['sh', '-c', 'until gitea admin create-user --name coreseed --password 123456 --email coressed@${DOMAIN} --admin; do echo "waiting to create admin user" ; sleep 3; done; while true ; do sleep 3600 ; done']
         volumeMounts:
         - name: git
           mountPath: "/data"
-        env:
-          - name:  "APP_NAME"
-            value: "Stark & Wayne :: Gitea"
-          - name:  "ROOT_URL"
-            value: "https://git.${DOMAIN}"
-          - name:  "DB_TYPE"
-            value: "postgres"
-          - name:  "DB_HOST"
-            value: "pg-git.ci.svc.cluster.local:5432"
-          - name:  "DB_NAME"
-            valueFrom:
-              secretKeyRef:
-                name: pg-git-secrets
-                key: db_name
-          - name:  "DB_USER"
-            valueFrom:
-              secretKeyRef:
-                name: pg-git-secrets
-                key: db_user
-          - name:  "DB_PASSWD"
-            valueFrom:
-              secretKeyRef:
-                name: pg-git-secrets
-                key: db_pass
-          - name: "SESSION_PROVIDER"
-            value: "redis"
-          - name: "SESSION_PROVIDER_CONFIG"
-            value: "network=tcp,addr=redis-master.ci.svc.cluster.local:6379,db=0,pool_size=100,idle_timeout=180"
-          - name: "CACHE_ADAPTER"
-            value: "redis"
-          - name: "CACHE_HOST"
-            value: "network=tcp,addr=redis-master.ci.svc.cluster.local:6379,db=1,pool_size=100,idle_timeout=180"
+        - name: config
+          mountPath: /data/gitea/conf/app.ini
+          subPath: app.ini
+      - name: gitea
+        image: "gitea/gitea:1.6.0"
+        livenessProbe:
+          httpGet:
+            port: http
+          initialDelaySeconds: 30
+          periodSeconds: 5
+        readinessProbe:
+          httpGet:
+            port: http
+          initialDelaySeconds: 15
+          periodSeconds: 5
+        ports:
+        - containerPort: 3000
+          protocol: TCP
+          name: http
+        - containerPort: 22
+          protocol: TCP
+          name: ssh
+        volumeMounts:
+        - name: git
+          mountPath: "/data"
+        - name: config
+          mountPath: /data/gitea/conf/app.ini
+          subPath: app.ini
       restartPolicy: Always
       terminationGracePeriodSeconds: 20
 ---
@@ -1898,9 +2005,23 @@ spec:
       protocol: TCP
       port: 80
       targetPort: 3000
+  selector:
+    app: gitea
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: gitea-ssh
+  namespace: ci
+  labels:
+    name: gitea-ssh
+spec:
+  type: NodePort
+  ports:
     - name: "gitea-ssh"
       protocol: TCP
       port: 22
+      nodePort: 22
       targetPort: 22
   selector:
     app: gitea
@@ -1924,14 +2045,18 @@ spec:
           servicePort: 80
         path: /
 EOF
+kubectl apply -f ${TMP}/ci/gitea.yml
+git add ${TMP}/ci/gitea.yml
+
 # matchbox
-kubectl create secret generic matchbox-rpc --from-file=ca.crt=ca_chain.pem --from-file=server.crt=matchbox.${DOMAIN}.cert.pem --from-file=server.key=matchbox.${DOMAIN}.key.pem
-cat << EOF | kubectl apply -f -
+kubectl create secret generic -n ci matchbox-rpc --from-file=ca.crt=ca_chain.pem --from-file=server.crt=matchbox.${DOMAIN}.cert.pem --from-file=server.key=matchbox.${DOMAIN}.key.pem
+cat << EOF > ${TMP}/ci/matchbox.yml
 ---
 apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
   name: matchbox
+  namespace: ci
 spec:
   replicas: 1
   strategy:
@@ -1983,6 +2108,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: matchbox
+  namespace: ci
 spec:
   type: NodePort
   selector:
@@ -2004,6 +2130,7 @@ apiVersion: extensions/v1beta1
 kind: Deployment
 metadata:
   name: dnsmasq
+  namespace: ci
   labels:
     app: dnsmasq
 spec:
@@ -2065,6 +2192,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: dnsmasq
+  namespace: ci
   labels:
     app: dnsmasq
 spec:
@@ -2083,4 +2211,200 @@ spec:
       nodePort: 68
       targetPort: 68
 EOF
-sudo mkdir /var/lib/matchbox/assets
+kubectl apply -f ${TMP}/ci/matchbox.yml
+git add ${TMP}/ci/matchbox.yml
+sudo mkdir -p /var/lib/matchbox/assets
+
+ssh-keygen -t ed25519  -f coreseed_ed25519 -N ''
+git add ${TMP}/certs/coreseed_ed25519
+git add ${TMP}/certs/coreseed_ed25519.pub
+
+while true; do
+	curl -k -f \
+		-H 'Content-Type: application/json' \
+		-u coreseed:123456 \
+		https://git.${DOMAIN}/api/v1/admin/users/coreseed/keys \
+		-d "{\"title\":\"coreseed\",\"read_only\":true,\"key\":\"$(cat coreseed_ed25519.pub)\"}" && break || sleep 1
+done
+curl -k -f -X POST "https://git.${DOMAIN}/api/v1/admin/users/coreseed/orgs" \
+	 -H  "accept: application/json" \
+	 -H "content-type: application/json" \
+	 -u coreseed:123456 \
+	 -d '{"username":"ci"}'
+
+curl -k -f -X POST "https://git.${DOMAIN}/api/v1/org/ci/repos" \
+	 -H "accept: application/json" \
+	 -H "content-type: application/json" \
+	 -u coreseed:123456 \
+	 -d '{"private":true,"name":"kubernetes", "description": "Automated Kubernetes with Flux"}'
+
+kubectl create secret generic -n ci flux-git-deploy --from-file=identity=coreseed_ed25519
+ssh-keyscan  -p 22 -t ssh-ed25519 git.$DOMAIN > known_hosts
+sed -e "/git.$DOMAIN/d" ~/.ssh/known_hosts
+ssh-keyscan  -p 22 -t ssh-ed25519 git.$DOMAIN >> ~/.ssh/known_hosts
+ssh-add -f coreseed_ed25519
+
+kubectl create configmap flux-ssh-config -n ci --from-file=known_hosts
+git add known_hosts
+
+git remote add origin git@git.$DOMAIN:ci/kubernetes.git
+echo "Auto generated" >> README.md
+git add README.md
+git commit -a -m 'initial commit'
+git push -u origin master
+
+
+cat << EOF > ${TMP}/ci/flux.yml
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  labels:
+    name: flux
+  name: flux
+  namespace: ci
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRole
+metadata:
+  labels:
+    name: flux
+  name: flux
+  namespace: ci
+rules:
+  - apiGroups: ['*']
+    resources: ['*']
+    verbs: ['*']
+  - nonResourceURLs: ['*']
+    verbs: ['*']
+---
+apiVersion: rbac.authorization.k8s.io/v1beta1
+kind: ClusterRoleBinding
+metadata:
+  labels:
+    name: flux
+  name: flux
+  namespace: ci
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: flux
+subjects:
+  - kind: ServiceAccount
+    name: flux
+    namespace: ci
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: memcached
+  namespace: ci
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: memcached
+  template:
+    metadata:
+      labels:
+        name: memcached
+    spec:
+      containers:
+      - name: memcached
+        image: memcached:1.4.25
+        imagePullPolicy: IfNotPresent
+        args:
+        - -m 64
+        - -p 11211
+        ports:
+        - name: clients
+          containerPort: 11211
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: memcached
+  namespace: ci
+spec:
+  clusterIP: None
+  ports:
+    - name: memcached
+      port: 11211
+  selector:
+    name: memcached
+  # The memcache client uses DNS to get a list of memcached servers and then
+  # uses a consistent hash of the key to determine which server to pick.
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: flux
+  namespace: ci
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: flux
+  strategy:
+    type: Recreate
+  template:
+    metadata:
+      annotations:
+        prometheus.io.port: "3031" # tell prometheus to scrape /metrics endpoint's port.
+      labels:
+        name: flux
+    spec:
+      serviceAccount: flux
+      volumes:
+      - name: git-key
+        secret:
+          secretName: flux-git-deploy
+          defaultMode: 0400 # when mounted read-only, we won't be able to chmod
+      - name: git-keygen
+        emptyDir:
+          medium: Memory
+      # The following volume is for using a customised known_hosts
+      # file, which you will need to do if you host your own git
+      # repo rather than using github or the like. You'll also need to
+      # mount it into the container, below. See
+      # https://github.com/weaveworks/flux/blob/master/site/standalone-setup.md#using-a-private-git-host
+      - name: ssh-config
+        configMap:
+          name: flux-ssh-config
+      containers:
+      - name: flux
+        image: quay.io/weaveworks/flux:1.8.1
+        imagePullPolicy: IfNotPresent
+        resources:
+          requests:
+            cpu: 50m
+            memory: 64Mi
+        ports:
+        - containerPort: 3030 # informational
+        volumeMounts:
+        - name: git-key
+          mountPath: /etc/fluxd/ssh # to match location given in image's /etc/ssh/config
+          readOnly: true # this will be the case perforce in K8s >=1.10
+        - name: git-keygen
+          mountPath: /var/fluxd/keygen # to match location given in image's /etc/ssh/config
+        # Include this if you need to mount a customised known_hosts
+        # file; you'll also need the volume declared above.
+        - name: ssh-config
+          mountPath: /root/.ssh
+        args:
+        # this must be supplied, and be in the tmpfs (emptyDir)
+        # mounted above, for K8s >= 1.10
+        - --ssh-keygen-dir=/var/fluxd/keygen
+
+        # replace or remove the following URL
+        - --git-url=git@git.${DOMAIN}:ci/kubernetes.git
+        - --git-branch=master
+        # serve /metrics endpoint at different port.
+        # make sure to set prometheus' annotation to scrape the port value.
+        - --listen-metrics=:3031
+EOF
+kubectl apply -f ${TMP}/ci/flux.yml
+git add ${TMP}/ci/flux.yml
+
+git commit -a -m 'Adding flux configs'
+git push

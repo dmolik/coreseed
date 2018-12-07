@@ -1,0 +1,5 @@
+#!/bin/bash
+
+
+sudo kill -9 $(ps auxf|grep -v grep|egrep 'install-cni|redis|matchbox|postgres|dnsmasq|s6-svscan|runsvdir|memcached|gitea\ admin'|awk '{print $2}')
+sudo su -c 'for m in $(ls /var/lib/containers/storage/overlay/ -1 ) ; do umount /var/lib/containers/storage/overlay/${m}/merged ; done '
