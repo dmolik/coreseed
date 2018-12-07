@@ -67,6 +67,7 @@ sudo cp system\:kube-scheduler.fullchain.pem /etc/kubernetes/scheduler/cert.full
 sudo chown root:root -R /etc/kubernetes 
 
 ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
+GITEA_PASS=$(head -c 16 /dev/random | base64)
 sudo su -c "cat << EOF > /etc/kubernetes/api/encryption.yml
 ---
 kind: EncryptionConfig
@@ -1430,7 +1431,7 @@ kubectl apply -f ${TMP}/dns/coredns.yml
 git add ${TMP}/dns/coredns.yml
 
 mkdir ${TMP}/ingress
-cat << EOF > ingress/nginx.yml
+cat << EOF > ${TMP}/ingress/nginx.yml
 ---
 apiVersion: v1
 kind: Namespace
@@ -1704,6 +1705,8 @@ EOF
 kubectl apply -f ${TMP}/ci/ns.yml
 git add ${TMP}/ci/ns.yml
 
+
+
 kubectl create -n ci secret tls git-tls --cert git.${DOMAIN}.fullchain.pem --key git.${DOMAIN}.key.pem
 cat << EOF > ${TMP}/ci/gitea.yml
 ---
@@ -1957,7 +1960,7 @@ spec:
       containers:
       - name: init-gitea
         image: "gitea/gitea:1.6.0"
-        command: ['sh', '-c', 'until gitea admin create-user --name coreseed --password 123456 --email coressed@${DOMAIN} --admin; do echo "waiting to create admin user" ; sleep 3; done; while true ; do sleep 3600 ; done']
+        command: ['sh', '-c', 'until gitea admin create-user --name coreseed --password ${GITEA_PASS} --email coressed@${DOMAIN} --admin; do echo "waiting to create admin user" ; sleep 3; done; while true ; do sleep 3600 ; done']
         volumeMounts:
         - name: git
           mountPath: "/data"
@@ -2222,34 +2225,36 @@ git add ${TMP}/certs/coreseed_ed25519.pub
 while true; do
 	curl -k -f \
 		-H 'Content-Type: application/json' \
-		-u coreseed:123456 \
+		-u coreseed:${GITEA_PASS} \
 		https://git.${DOMAIN}/api/v1/admin/users/coreseed/keys \
 		-d "{\"title\":\"coreseed\",\"read_only\":true,\"key\":\"$(cat coreseed_ed25519.pub)\"}" && break || sleep 1
 done
 curl -k -f -X POST "https://git.${DOMAIN}/api/v1/admin/users/coreseed/orgs" \
 	 -H  "accept: application/json" \
 	 -H "content-type: application/json" \
-	 -u coreseed:123456 \
+	 -u coreseed:${GITEA_PASS} \
 	 -d '{"username":"ci"}'
 
 curl -k -f -X POST "https://git.${DOMAIN}/api/v1/org/ci/repos" \
 	 -H "accept: application/json" \
 	 -H "content-type: application/json" \
-	 -u coreseed:123456 \
+	 -u coreseed:${GITEA_PASS} \
 	 -d '{"private":true,"name":"kubernetes", "description": "Automated Kubernetes with Flux"}'
 
 kubectl create secret generic -n ci flux-git-deploy --from-file=identity=coreseed_ed25519
 ssh-keyscan  -p 22 -t ssh-ed25519 git.$DOMAIN > known_hosts
-sed -e "/git.$DOMAIN/d" ~/.ssh/known_hosts
+sed -i -e "/git.$DOMAIN/d" \
+	 -e "/$IP/d" \
+	 ~/.ssh/known_hosts
 ssh-keyscan  -p 22 -t ssh-ed25519 git.$DOMAIN >> ~/.ssh/known_hosts
-ssh-add -f coreseed_ed25519
+ssh-add coreseed_ed25519
 
 kubectl create configmap flux-ssh-config -n ci --from-file=known_hosts
 git add known_hosts
 
 git remote add origin git@git.$DOMAIN:ci/kubernetes.git
-echo "Auto generated" >> README.md
-git add README.md
+echo "Auto generated" >> ${TMP}/README.md
+git add ${TMP}/README.md
 git commit -a -m 'initial commit'
 git push -u origin master
 
@@ -2408,3 +2413,5 @@ git add ${TMP}/ci/flux.yml
 
 git commit -a -m 'Adding flux configs'
 git push
+
+echo "The coreseed password for Gitea is ${GITEA_PASS}"
