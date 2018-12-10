@@ -2397,15 +2397,10 @@ spec:
         - name: ssh-config
           mountPath: /root/.ssh
         args:
-        # this must be supplied, and be in the tmpfs (emptyDir)
-        # mounted above, for K8s >= 1.10
         - --ssh-keygen-dir=/var/fluxd/keygen
-
-        # replace or remove the following URL
         - --git-url=git@git.${DOMAIN}:ci/kubernetes.git
         - --git-branch=master
-        # serve /metrics endpoint at different port.
-        # make sure to set prometheus' annotation to scrape the port value.
+        - --git-poll-interval=120
         - --listen-metrics=:3031
 EOF
 kubectl apply -f ${TMP}/ci/flux.yml
