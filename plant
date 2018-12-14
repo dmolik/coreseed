@@ -19,6 +19,8 @@ HOST=$(echo $FQDN|sed -e 's/\..*$//')
 DOMAIN=$(echo $FQDN|sed -e "s/$HOST\.//")
 KUBE_IP=$(echo $SERVICE_CIDR|sed -e 's/\.[0-9]\+\/[0-9]\+$/\.1/')
 DNS_IP=$(echo $SERVICE_CIDR|sed -e 's/\.[0-9]\+\/[0-9]\+$/\.53/')
+KUBERNETES_VERSION=1.13.1
+
 
 TMP=$(mktemp -d)
 echo "Working dir: ${TMP}"
@@ -41,6 +43,17 @@ git add *
 
 sudo mkdir -p /etc/kubernetes/{manifests,certs,etcd,api,controller,scheduler}
 
+function add_user(){
+	getent passwd $1 > /dev/null \
+		&& echo "user [$1] already exists, doing nothing" \
+		|| sudo useradd -r $1
+}
+
+add_user etcd
+add_user kube-scheduler
+add_user kube-apiserver
+add_user kube-controller-manager
+
 sudo cp ca_chain.pem                      /etc/kubernetes/certs/ca.chain.pem
 sudo cp system\:node\:$HOST.fullchain.pem /etc/kubernetes/certs/cert.fullchain.pem
 sudo cp system\:node\:$HOST.key.pem       /etc/kubernetes/certs/cert.key.pem
@@ -53,6 +66,7 @@ sudo cp service-account.cert.pem /etc/kubernetes/api/
 sudo cp ca_chain.pem        /etc/kubernetes/etcd/ca.chain.pem
 sudo cp $FQDN.fullchain.pem /etc/kubernetes/etcd/cert.fullchain.pem
 sudo cp $FQDN.key.pem       /etc/kubernetes/etcd/cert.key.pem
+sudo mkdir /var/lib/etcd
 
 sudo cp ca_chain.pem                                  /etc/kubernetes/controller/ca.chain.pem
 sudo cp system\:kube-controller-manager.key.pem       /etc/kubernetes/controller/cert.key.pem
@@ -64,7 +78,9 @@ sudo cp service-account.key.pem                       /etc/kubernetes/controller
 sudo cp ca_chain.pem                         /etc/kubernetes/scheduler/ca.chain.pem
 sudo cp system\:kube-scheduler.key.pem       /etc/kubernetes/scheduler/cert.key.pem
 sudo cp system\:kube-scheduler.fullchain.pem /etc/kubernetes/scheduler/cert.fullchain.pem
+
 sudo chown root:root -R /etc/kubernetes 
+
 
 ENCRYPTION_KEY=$(head -c 32 /dev/urandom | base64)
 GITEA_PASS=$(head -c 16 /dev/random | base64)
@@ -171,6 +187,21 @@ contexts:
 current-context: sw-context
 EOF"
 
+sudo chown -R kube-controller-manager:kube-controller-manager /etc/kubernetes/controller
+sudo chown -R etcd:etcd /etc/kubernetes/etcd
+sudo chown -R etcd:etcd /var/lib/etcd
+sudo chown -R kube-scheduler:kube-scheduler /etc/kubernetes/scheduler
+sudo chown -R kube-apiserver:kube-apiserver /etc/kubernetes/api
+
+ETCD_UID=$(id etcd -u)
+ETCD_GID=$(id etcd -g)
+CONTROLLER_UID=$(id kube-controller-manager -u)
+CONTROLLER_GID=$(id kube-controller-manager -g)
+API_UID=$(id kube-apiserver -u)
+API_GID=$(id kube-apiserver -g)
+SCHEDULER_UID=$(id kube-scheduler -u)
+SCHEDULER_GID=$(id kube-scheduler -g)
+
 sudo su -c "cat << EOF > /etc/kubernetes/manifests/etcd.yml
 ---
 apiVersion: v1
@@ -179,6 +210,9 @@ metadata:
   name: etcd
   namespace: kube-system
 spec:
+  securityContext:
+    runAsUser: ${ETCD_UID}
+    fsGroup: ${ETCD_GID}
   containers:
   - image: docker.io/whisperos/etcd:3.3.10
     command:
@@ -250,27 +284,24 @@ spec:
       path: /etc/kubernetes/etcd
     name: etc
 EOF"
-sudo su -c "cat << EOF > /etc/kubernetes/manifests/control-plane.yml
+sudo su -c "cat << EOF > /etc/kubernetes/manifests/kube-apiserver.yml
 ---
 apiVersion: v1
 kind: Pod
 metadata:
-  name: control-plane
+  name: kube-apiserver
   namespace: kube-system
 spec:
+  securityContext:
+    runAsUser: ${API_UID}
+    fsGroup: ${API_GID}
   hostNetwork: true
   volumes:
   - hostPath:
       path: /etc/kubernetes/api
     name: etc-api
-  - hostPath:
-      path: /etc/kubernetes/scheduler
-    name: etc-scheduler
-  - hostPath:
-      path: /etc/kubernetes/controller
-    name: etc-controller
   containers:
-  - image: docker.io/whisperos/kube-apiserver:1.13.0
+  - image: docker.io/whisperos/kube-apiserver:${KUBERNETES_VERSION}
     name: kube-apiserver
     command:
     - /kube-apiserver
@@ -322,8 +353,26 @@ spec:
     - mountPath: /etc/kubernetes/api
       name: etc-api
       readOnly: true
+EOF"
+sudo su -c "cat << EOF > /etc/kubernetes/manifests/kube-controller-manager.yml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-controller-manager
+  namespace: kube-system
+spec:
+  securityContext:
+    runAsUser: ${CONTROLLER_UID}
+    fsGroup: ${CONTROLLER_GID}
+  hostNetwork: true
+  volumes:
+  - hostPath:
+      path: /etc/kubernetes/controller
+    name: etc-controller
+  containers:
   - name: kube-controller-manager
-    image: docker.io/whisperos/kube-controller-manager:1.13.0
+    image: docker.io/whisperos/kube-controller-manager:${KUBERNETES_VERSION}
     command:
     - /kube-controller-manager
     args:
@@ -355,8 +404,26 @@ spec:
     - mountPath: /etc/kubernetes/controller
       name: etc-controller
       readOnly: false
+EOF"
+sudo su -c "cat << EOF > /etc/kubernetes/manifests/kube-scheduler.yml
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: kube-scheduler
+  namespace: kube-system
+spec:
+  securityContext:
+    runAsUser: ${SCHEDULER_UID}
+    fsGroup: ${SCHEDULER_GID}
+  hostNetwork: true
+  volumes:
+  - hostPath:
+      path: /etc/kubernetes/scheduler
+    name: etc-scheduler
+  containers:
   - name: kube-scheduler
-    image: docker.io/whisperos/kube-scheduler:1.13.0
+    image: docker.io/whisperos/kube-scheduler:${KUBERNETES_VERSION}
     command:
     - /kube-scheduler
     args:
@@ -1145,7 +1212,7 @@ spec:
         operator: Exists
       containers:
       - name: kube-proxy
-        image: docker.io/whisperos/kube-proxy:1.13.0
+        image: docker.io/whisperos/kube-proxy:${KUBERNETES_VERSION}
         command:
         - /kube-proxy
         args:
